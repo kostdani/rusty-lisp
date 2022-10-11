@@ -1,0 +1,626 @@
+* Structures
+** S-expression
+#+begin_src rust :tangle tinylisp.rs
+  enum Sexp {
+      Nil,
+      Integer(i32),
+      String(String),
+      Symbol(String),
+      Pair(Box<Sexp>,Box<Sexp>),
+      Function(fn(Sexp) -> Sexp),
+      Lambda(Box<Sexp>, Box<Sexp>, Box<Env>)
+
+  }
+
+  impl Sexp {
+      fn clone(&self) -> Sexp {
+	  match self{
+	      Sexp::Nil => Sexp::Nil,
+	      Sexp::Integer(i) => Sexp::Integer(i.clone()),
+	      Sexp::String(s) => Sexp::String(s.to_string()),
+	      Sexp::Symbol(s) => Sexp::Symbol(s.to_string()),
+	      Sexp::Pair(car,cdr) => Sexp::Pair(Box::new((*car).clone()),
+						Box::new((*cdr).clone())),
+	      Sexp::Function(f) => Sexp::Function(f.clone()),
+	      Sexp::Lambda(a,l,e) => Sexp::Lambda(Box::new((*a).clone()), Box::new((*l).clone()), (*e).clone()),
+
+	  }
+      }
+      fn to_string(&self) -> String{
+	match self{
+	    Sexp::Nil => return String::from("Nil"),
+	    Sexp::Integer(i) => return format!("{}",i),
+	    Sexp::String(s) => return format!("\"{}\"",s),
+	    Sexp::Symbol(s) => return format!("{}",s),
+	    Sexp::Function(_) => return format!("<builtin>"),
+	    Sexp::Lambda(_,_,_) => return format!("<lambda>"),
+	    Sexp::Pair( car,  cdr) => {
+		let mut res=format!("({}",car.to_string());
+		let mut sexpr=(**cdr).clone();
+		loop{
+		    match sexpr{
+			Sexp::Pair(x , y) => {
+			    sexpr=*y;
+			    res=format!("{} {}",res, (*x).to_string());
+			},
+			_ => break,
+		    }
+		}
+		match sexpr{
+		    Sexp::Nil => res=format!("{})",res),
+		    _ => res=format!("{} . {})",res, sexpr.to_string()),
+		}
+		return res;
+	    }
+
+	}
+    }
+  }
+
+#+end_src
+
+** Environment
+#+begin_src rust  :tangle tinylisp.rs 
+  enum Env{
+      Data(String, Sexp, Box<Env>),
+      Nil
+  }
+
+  impl Clone for Env {
+      fn clone(&self) -> Env {
+	  match self {
+	      Env::Data(s,e,n) => Env::Data(s.to_string(),e.clone(),n.clone()),
+	      Env::Nil => Env::Nil,
+	  }
+      }
+  }
+
+#+end_src
+
+* Builtin functions
+** helpers
+#+begin_src rust :tangle tinylisp.rs
+
+    fn begin(args: Sexp) ->Sexp{
+	match args{
+	    Sexp::Pair(car,cdr) => {
+		match *cdr{
+		    Sexp::Nil => return *car,
+		    _ => return begin(*cdr)
+		}
+	    },
+	    _ => panic!("begin")
+	}
+    }
+
+
+    fn lookup(symbol:String, env:Env)-> Option<Sexp>{
+	match env{
+	    Env::Nil => return None,
+	    Env::Data(s, v, next) => {
+		if symbol.eq(&s){
+		    return Some(v);
+		}else{
+		    return lookup(symbol,*next);
+		}
+	    }
+	}
+    }
+
+
+
+
+    fn eval_args(args: Sexp, env:Env) -> Sexp{
+	match args{
+	    Sexp::Pair(car,cdr) =>{
+		return Sexp::Pair(Box::new(eval(*car,env.clone())), Box::new(eval_args(*cdr,env)));
+	    },
+	    _ => return args
+	}
+    }
+
+#+end_src
+
+** eval&apply
+#+begin_src rust  :tangle tinylisp.rs 
+    fn apply(callee: Sexp, args: Sexp) -> Sexp{
+	match callee{
+	    Sexp::Function(f) => {
+		return f(args)
+	    },
+	    Sexp::Lambda(a, l, e) => {
+		let mut env=*e;
+		let mut names=*a;
+		let mut vals=args;
+		loop{
+		    match (names, vals){
+			(Sexp::Nil, Sexp::Nil) => return eval(*l, env),
+			(Sexp::Pair(name, rnames), Sexp::Pair(val, rvals)) => {
+			    match *name{
+				Sexp::Symbol(str) => env=Env::Data(str,*val,Box::new(env)),
+				_ => panic!("applylambda1")
+			    }
+			    names=*rnames;
+			    vals=*rvals;
+			},
+			_ => panic!("applylambda2")
+		    }
+		}
+	    }
+	    _ => {
+		panic!("cannot apply");
+	    }
+	}
+    }
+
+    fn eval(sexp: Sexp, env: Env) -> Sexp{
+	match sexp{
+	    Sexp::Symbol(str) => {
+		match lookup(str, env){
+		    Some(x) => return x,
+		    None => panic!("no associated symbol") 
+		}
+	    },
+	    Sexp::Pair(car, cdr) => {
+		match *car{
+		    Sexp::Symbol(ref str) => {
+			if str.eq("quote"){
+			    match *cdr{
+				Sexp::Pair(cadr,_)=>return *cadr,
+				_ => panic!("quote")
+			    }
+			}else if str.eq("lambda"){
+			    match *cdr{
+				Sexp::Pair(cadr,cddr) => {
+				    return Sexp::Lambda(Box::new(*cadr),Box::new(Sexp::Pair(Box::new(Sexp::Symbol("begin".to_string())),
+											    Box::new(*cddr))),
+							Box::new(env));
+				},
+				_ => panic!("lambda2")
+			    }
+			}else if str.eq("if"){
+			    match *cdr{
+				Sexp::Pair(cadr, cddr) =>{ 
+				    match *cddr{
+					Sexp::Pair(caddr, cdddr) =>{
+					    if let Sexp::Nil = eval(*cadr, env.clone()){}else{
+						return eval(*caddr,env);
+					    }match *cdddr{
+						Sexp::Pair(cadddr,_)=> return eval(*cadddr, env),
+						_ => panic!("if1")
+					    }
+					},
+					_ => panic!("if2")
+				    }
+				},
+				_ => panic!("if3")
+
+			    }
+			}else{
+			    return apply(eval(*car, env.clone()), eval_args(*cdr, env));
+			}
+		    },
+		    _ => return apply(eval(*car, env.clone()), eval_args(*cdr, env))
+
+		}
+	    },
+	    _ => return sexp
+	}
+    }
+
+
+#+end_src
+
+** pairs
+#+begin_src rust  :tangle tinylisp.rs
+    fn cons(args:Sexp) -> Sexp{
+	match args{
+	    Sexp::Pair(car,cdr) =>{
+		match *cdr{
+		    Sexp::Pair(cadr,_) => {
+			return Sexp::Pair(Box::new(*car),Box::new(*cadr));
+		    },
+		    _ => panic!("cons 1"),
+		}
+	    },
+	    _ => panic!("cons 2"),
+	}
+    }
+
+    fn car(args:Sexp) -> Sexp{
+	match args{
+	    Sexp::Pair(car,_) =>{
+		match *car{
+		    Sexp::Pair(caar,_) => {
+			return *caar;
+		    },
+		    _ => panic!("car 1"),
+		}
+	    },
+	    _ => panic!("car 2"),
+	}
+    }
+
+    fn cdr(args:Sexp) -> Sexp{
+	match args{
+	    Sexp::Pair(car,_) =>{
+		match *car{
+		    Sexp::Pair(_,cdar) => {
+			return *cdar;
+		    },
+		    _ => panic!("cdr 1"),
+		}
+	    },
+	    _ => panic!("cdr 2"),
+	}
+    }
+
+#+end_src
+
+** arithmetic
+#+begin_src rust  :tangle tinylisp.rs
+    fn sum(args:Sexp) -> Sexp{
+	match args{
+	    Sexp::Pair(car,cdr) => {
+		match *car{
+		    Sexp::Integer(i1) =>{
+			match *cdr{
+			    Sexp::Nil => return *car,
+			    _ =>{
+				match sum(*cdr){
+				    Sexp::Integer(i2) => return Sexp::Integer(i1+i2),
+				    _ => panic!("sum1"),
+				}
+			    }
+			}
+		    },
+		    _ => panic!("sum2"),
+		}
+	    },
+	    _ => panic!("sum3"),
+	}
+    }
+
+    fn mul(args:Sexp) -> Sexp{
+	match args{
+	    Sexp::Pair(car,cdr) => {
+		match *car{
+		    Sexp::Integer(i1) =>{
+			match *cdr{
+			    Sexp::Nil => return *car,
+			    _ =>{
+				match mul(*cdr){
+				    Sexp::Integer(i2) => return Sexp::Integer(i1*i2),
+				    _ => panic!("sum1"),
+				}
+			    }
+			}
+		    },
+		    _ => panic!("sum2"),
+		}
+	    },
+	    _ => panic!("sum3"),
+	}
+    }
+
+
+#+end_src
+
+
+* Reading
+** Lexer`
+#+begin_src rust :tangle tinylisp.rs
+      use std::io::Read;
+
+
+
+      enum CharType {
+	  Letter(char),
+	  Number(char),
+	  End,
+	  Whitespace,
+	  Notype(char)
+      }
+
+
+      impl Clone for CharType {
+	  fn clone(&self) -> CharType {
+	      match self{
+		  CharType::Letter(c) => CharType::Letter(c.clone()),
+		  CharType::Number(c) => CharType::Number(c.clone()),
+		  CharType::Notype(c) => CharType::Notype(c.clone()),
+		  CharType::Whitespace => CharType::Whitespace,
+		  CharType::End => CharType::End,
+
+	      }
+	  }
+      }
+
+      enum Token{
+	  LeftPar,
+	  RightPar,
+	  Dot,
+	  Apostrophe,
+	  Symbol(String),
+	  String(String),
+	  Number(i32),
+	  Unknown,
+	  End
+      }
+
+      //static mut  input:CharType=CharType::Whitespace;
+
+      fn getchar() -> char{
+	  let ch: Option<char> = std::io::stdin()
+	      .bytes() 
+	      .next()
+	      .and_then(|result| result.ok())
+	      .map(|byte| byte as char);
+	  match ch{
+	      None => return '\0',
+	      Some(x) => return x
+	  }
+      }
+
+      fn read_input() -> CharType{
+	  let character=getchar();
+	  if character >='A'  && character<='Z'
+	      || character >='a' && character <='z'
+	      || character =='_' || character == '+' || character == '*' || character =='$'{
+	      return CharType::Letter(character);
+	  }else if character >='0' && character<='9'{
+	      return CharType::Number(character);
+	  }else if character == '\0'{
+	      return CharType::End;
+	  }else if character <= ' '{
+	      return CharType::Whitespace;
+	  }else{
+	      return CharType::Notype(character);
+	  }
+      }
+
+      fn gettok(inp: CharType) -> (Token ,CharType) {
+	  let mut input=inp;
+	  loop{
+	      match input{
+		  CharType::Whitespace => input=read_input(),
+		  _ => break
+	      }
+	  }
+	  match input{
+	      CharType::End => return (Token::End, input),
+	      CharType::Notype(ch) => {
+		  match ch{
+		      '(' =>{input=read_input();
+			     return (Token::LeftPar , input)},
+		      ')' =>{input=read_input();
+			     return (Token::RightPar, input)},
+		      '.' =>{input=read_input();
+			     return (Token::Dot, input)},
+		      '\'' =>{input=read_input();
+			      return (Token::Apostrophe, input)},
+		      '\"' => {
+			  let mut str = "".to_string();
+			  loop{
+			      let char=getchar();
+			      if char=='\"'{
+				  input=read_input();
+				  return (Token::String(str), input);
+			      }
+			      str=format!("{}{}",str,char);    
+			  }
+		      },
+		      _ => return (Token::Unknown, input),
+
+		  }
+	      },
+	      CharType::Letter(ch) =>{
+		  let mut str =format!("{}",ch);
+		  loop{
+		      input=read_input();
+		      match input{
+			  CharType::Number(ch) => str=format!("{}{}",str,ch),
+			  CharType::Letter(ch) => str=format!("{}{}",str,ch),
+			  _ => {
+			      //input=read_input();
+			      return (Token::Symbol(str), input);
+			  },
+		      }
+		  }
+	      },
+	      CharType::Number(ch) =>{
+		  let mut num:i32 = ch as i32 -'0' as i32;
+		  loop{
+		      input=read_input();
+		      match input{
+			  CharType::Number(ch) =>{
+			      num=10*num+(ch as i32-'0' as i32);
+			  },
+			  _ => return (Token::Number(num), input)
+		      }    
+		  }
+	      },
+	      _ => (Token::Unknown, input)
+
+	  }
+      }
+
+#+end_src
+** Parser
+#+begin_src rust :tangle tinylisp.rs
+
+  struct Parser{
+      debug: bool,
+      curtok: Token,
+      lastchar: CharType
+  }
+
+  impl Parser{
+      fn get_next_token(&mut self){
+	  let tpair=gettok(self.lastchar.clone());
+	  self.curtok=tpair.0;
+	  self.lastchar=tpair.1;
+      }
+      fn compare(&mut self, tok:Token ){
+	  if std::mem::discriminant(&tok) == std::mem::discriminant(&self.curtok){
+	      self.get_next_token();
+	  }else{
+	      println!("ERROR: expected");
+	      match tok{
+		  Token::LeftPar => println!("<(> "),
+		  Token::RightPar => println!("<)> "), 
+		  Token::Dot => println!("<.> "),
+		  Token::Apostrophe => println!("<'> "),
+		  Token::Symbol(s) => println!("<sym> {} ",s),
+		  Token::String(s) => println!("<str> {} ",s),
+		  Token::Number(i) => println!("<num> {} ",i),
+		  Token::Unknown => println!("<unk> "),
+		  Token::End => println!("<end> "),
+	      }
+	      panic!();
+	  }
+      }
+      fn atom(&mut self,d:i32) -> Sexp{
+	  match &self.curtok{
+	      Token::Number(i) => {
+		  if self.debug{
+		      println!("(4.1) A -> num ({})",i);
+		  }
+		  let res=Sexp::Integer(*i);
+		  if d>0{
+		      self.get_next_token();
+		  }
+		  return res;
+		  //compare(Token::Number);
+	      },
+	      Token::String(i) => {
+		  if self.debug{
+		      println!("(4.2) A -> str ({})",i);
+		  }
+		  let res=Sexp::String(i.to_string());
+		  if d>0{
+		      self.get_next_token();
+		  }
+		  return res;
+		  //compare(Token::String);
+	      },
+	      Token::Symbol(i) => {
+		  if self.debug{
+		      println!("(4.3) A -> sym ({})",i);
+		  }
+		  let res=Sexp::Symbol(i.to_string());
+		  if d>0{
+		      self.get_next_token();
+		  }
+		  return res;
+		  //compare(Token::Symbol);
+	      },
+	      _ => panic!("atom")
+	  }
+      }
+      fn tail(&mut self,d:i32) -> Sexp{
+	  match self.curtok{
+	      Token::RightPar => {
+		  if self.debug{
+		      println!("(3.1) T -> e");
+		  }
+		  return Sexp::Nil;
+	      },
+	      Token::Dot => {
+		  if self.debug{
+		      println!("(3.2) T -> . E");
+		  }
+		  self.compare(Token::Dot);
+		  return self.expression(d);
+	      },
+	      _ => {
+		  if self.debug{
+		      println!("(3.3) T -> E T");
+		  }
+		  let a = self.expression(d);
+		  let b = self.tail(d);
+		  return Sexp::Pair(Box::new(a),Box::new(b));
+	      }
+	  }
+      }
+      fn list(&mut self,d:i32) -> Sexp{
+	  if self.debug{
+	      println!("(2) L -> (E T)");
+	  }
+	  self.compare(Token::LeftPar);
+	  let a = self.expression(d+1);
+	  let b = self.tail(d+1);
+	  if d>0{
+	      self.compare(Token::RightPar);
+	      return Sexp::Pair(Box::new(a),Box::new(b));
+	  }
+	  else if let Token::RightPar = self.curtok{
+	      return Sexp::Pair(Box::new(a),Box::new(b));
+	  }
+	  return Sexp::Nil;
+      }
+      fn expression(&mut self,d:i32) -> Sexp{
+	  match self.curtok{
+	      Token::LeftPar => {
+		  if self.debug{
+		      println!("(1.1) E -> L");
+		  }
+		  return self.list(d);
+	      },
+	      Token::Apostrophe => {
+		  if self.debug{
+		      println!("(1.2) E -> 'E");
+		  }
+		  self.compare(Token::Apostrophe);
+		  return Sexp::Pair(Box::new(Sexp::Symbol("quote".to_string())),
+				    Box::new(Sexp::Pair(Box::new(self.expression(d)), Box::new(Sexp::Nil))));
+
+	      }
+	      _ =>{
+		  if self.debug{
+		      println!("(1.3) E -> A");
+		  }
+		  return self.atom(d);	    }
+	  }
+      }
+
+  }
+
+  fn read()->Sexp{
+      let mut parser=Parser{debug: false, curtok: Token::Unknown, lastchar: CharType::Whitespace};
+      parser.get_next_token();
+      return parser.expression(0);
+  }
+
+
+#+end_src
+
+* Tests
+#+begin_src rust :tangle tinylisp.rs
+
+  fn mk_env()->Env{
+      let mut basic_env =Env::Nil;
+      basic_env =Env::Data("begin".to_string(),Sexp::Function(begin),Box::new(basic_env));
+      basic_env =Env::Data("cons".to_string(),Sexp::Function(cons),Box::new(basic_env));
+      basic_env =Env::Data("car".to_string(),Sexp::Function(car),Box::new(basic_env));
+      basic_env =Env::Data("cdr".to_string(),Sexp::Function(cdr),Box::new(basic_env));
+      basic_env =Env::Data("+".to_string(),Sexp::Function(sum),Box::new(basic_env));
+      basic_env =Env::Data("*".to_string(),Sexp::Function(mul),Box::new(basic_env));
+      return basic_env;
+  }
+   fn repl(){
+      let mut i=1;
+      let mut env=mk_env();
+      loop{
+	  let res=eval(read(), env.clone());
+	  env=Env::Data(format!("${}",i), res.clone(), Box::new(env));
+	  println!("${} = {}",i,res.to_string());
+	  i+=1;
+      }
+  }
+
+
+  fn main() {
+      repl();
+  }
+#+end_src
